@@ -1,0 +1,17 @@
+type Query {
+  # Obtener una lista de unidades disponibles (estan viajando ahora)
+  # Obtener una lista de unidades que hayan estado dentro de una alcaldía
+  # Consultar los el historial de ubicaciones/fechas de una unidad dado su ID
+  ubicaciones(unidadId: String, alcaldia: String, horaIso8601: String): [UnidadHoraUbicacion!]!
+
+  # Obtener una lista de alcaldías disponibles
+  alcaldiasDisponibles(horaIso8601: String): [String!]!
+}
+
+type UnidadHoraUbicacion {
+  hora: String!
+  alcaldia: String!
+  latLongText: String!
+  ewkbHex: String!
+  vehicleId: String!
+}
