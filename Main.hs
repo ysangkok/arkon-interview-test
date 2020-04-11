@@ -5,27 +5,36 @@
 {-# LANGUAGE TypeFamilies          #-}
 {-# LANGUAGE NamedFieldPuns        #-}
 {-# LANGUAGE OverloadedStrings     #-}
+{-# LANGUAGE FlexibleInstances     #-}
 
 module Main where
 
 import qualified Data.Text as T
-import           Data.Text                  (Text)
+import           Data.Text (Text)
 import Control.Monad (forM_)
 import Network.URI.Encode (encodeText)
 import Data.Morpheus.Client
+import Data.Morpheus.Types (ScalarValue)
+import Control.Monad.Except (runExceptT, liftEither)
+import Control.Monad.IO.Class (liftIO)
+import Data.Time.LocalTime (ZonedTime)
+import Data.Time.Format.ISO8601 (iso8601ParseM)
 
-import Server (api)
+import Server (api, Zoned(Zoned))
+
+instance MonadFail (Either String) where
+  fail = Left
 
 defineByDocumentFile
   "./schema.gql"
   [gql|
-  query Q ($unidadId: String, $alcaldia: String, $horaIso8601: String) {
+  query Q ($unidadId: Int, $alcaldia: String, $horaIso8601: Zoned) {
     ubicaciones (unidadId: $unidadId, alcaldia: $alcaldia, horaIso8601: $horaIso8601) {
-      latLongText
-      ewkbHex
-      hora
-      alcaldia
-      vehicleId
+      uLatLonText
+      uEwkbB64
+      uHora
+      uAlcaldia
+      uVehicleId
     }
   }
   |]
@@ -33,13 +42,13 @@ defineByDocumentFile
 defineByDocumentFile
   "./schema.gql"
   [gql|
-  query Q2 ($horaIso8601: String) {
-    alcaldiasDisponibles (horaIso8601: $horaIso8601)
+  query Q2 ($horaIso8601: Zoned) {
+    alcaldiasDisponibles (aHoraIso8601: $horaIso8601)
   }
   |]
 
 
-getUbicacionDeUnidad :: String -> IO (Either String Q)
+getUbicacionDeUnidad :: Int -> IO (Either String Q)
 getUbicacionDeUnidad vehicleId =
    fetch api QArgs {qArgsUnidadId = Just vehicleId, qArgsAlcaldia = Nothing,       qArgsHoraIso8601 = Nothing}
 
@@ -47,35 +56,47 @@ getDentroAlcaldia :: String -> IO (Either String Q)
 getDentroAlcaldia alcaldia =
    fetch api QArgs {qArgsUnidadId = Nothing,        qArgsAlcaldia = Just alcaldia, qArgsHoraIso8601 = Nothing}
 
-getBusEnHoraEnAlcaldia :: String -> String -> IO (Either String Q)
+getBusEnHoraEnAlcaldia :: ZonedTime -> String -> IO (Either String Q)
 getBusEnHoraEnAlcaldia hora alcaldia =
-   fetch api QArgs {qArgsUnidadId = Nothing, qArgsAlcaldia = Just alcaldia, qArgsHoraIso8601 = Just hora }
+   fetch api QArgs {qArgsUnidadId = Nothing, qArgsAlcaldia = Just alcaldia, qArgsHoraIso8601 = Just (Zoned hora) }
 
-getAlcaldiasDisponibles :: Maybe String -> IO (Either String Q2)
+getAlcaldiasDisponibles :: Maybe ZonedTime -> IO (Either String Q2)
 getAlcaldiasDisponibles hora =
-   fetch api Q2Args {q2ArgsHoraIso8601 = hora}
+   fetch api Q2Args {q2ArgsHoraIso8601 = fmap Zoned hora}
 
 prependGoogle :: Text -> Text
 prependGoogle = ("https://www.google.com/maps/place/" <>)
 
-main :: IO ()
+run :: IO (Either String ())
+run = runExceptT $ do
+  hora <- liftEither $ iso8601ParseM "2020-04-08T22:00:00-05:00"
+
+  liftIO $ putStrLn "Ubicaciones de bus 1288:"
+  res <- liftIO $ getUbicacionDeUnidad 1288
+  (Q { ubicaciones }) <- liftEither res
+  forM_ ubicaciones $ liftIO . putStrLn . T.unpack . prependGoogle . encodeText . uLatLonText
+
+  liftIO $ putStrLn "Quáles unidades han estado dentro de Coyoacán?"
+  res <- liftIO $ getDentroAlcaldia "Coyoacán"
+  (Q { ubicaciones })  <- liftEither res
+  liftIO $ print $ map uVehicleId ubicaciones
+
+  liftIO $ putStrLn "Quáles unidades han estado dentro de Coyoacán el 8 de Abril de las 20:00 a las 23:59 en la noche?"
+  res <- liftIO $ getBusEnHoraEnAlcaldia hora "Coyoacán"
+  (Q { ubicaciones }) <- liftEither res
+  liftIO $ print $ map uVehicleId ubicaciones
+
+  liftIO $ putStrLn "Alcaldías disponibles"
+  res <- liftIO $ getAlcaldiasDisponibles $ Just hora
+  (Q2 { alcaldiasDisponibles=alcaldias }) <- liftEither res
+  liftIO $ print alcaldias
+
+  res <- liftIO $ getAlcaldiasDisponibles $ Nothing
+  (Q2 { alcaldiasDisponibles=alcaldias }) <- liftEither res
+  liftIO $ print alcaldias
+
 main = do
-  putStrLn "Ubicaciones de bus 1288:"
-  Right (Q { ubicaciones }) <- getUbicacionDeUnidad "1288"
-  forM_ ubicaciones $ putStrLn . T.unpack . prependGoogle . encodeText . latLongText
-
-  putStrLn "Quáles unidades han estado dentro de Coyoacán?"
-  Right (Q { ubicaciones }) <- getDentroAlcaldia "Coyoacán"
-  print $ map vehicleId ubicaciones
-
-  putStrLn "Quáles unidades han estado dentro de Coyoacán el 8 de Abril de las 20:00 a las 23:59 en la noche?"
-  Right (Q { ubicaciones }) <- getBusEnHoraEnAlcaldia "2020-04-08T22:00:00-05:00" "Coyoacán"
-  print $ map vehicleId ubicaciones
-
-  putStrLn "Alcaldías disponibles"
-  Right (Q2 alcaldias) <- getAlcaldiasDisponibles $ Just "2020-04-08T22:00:00-05:00"
-  print alcaldias
-
-  Right (Q2 alcaldias) <- getAlcaldiasDisponibles $ Nothing
-  print alcaldias
-
+  res <- run
+  case res of
+    Right () -> return ()
+    Left err -> putStrLn $ "ExceptT errored: " ++ err

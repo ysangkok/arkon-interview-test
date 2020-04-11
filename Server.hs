@@ -7,12 +7,14 @@
 {-# LANGUAGE NamedFieldPuns        #-}
 {-# LANGUAGE OverloadedStrings     #-}
 {-# LANGUAGE ScopedTypeVariables   #-}
-{-# LANGUAGE TemplateHaskell       #-}
 {-# LANGUAGE TypeFamilies          #-}
 {-# LANGUAGE TypeApplications      #-}
 {-# LANGUAGE QuasiQuotes           #-}
+{-# LANGUAGE DataKinds             #-}
+{-# LANGUAGE DeriveAnyClass        #-}
+{-# LANGUAGE LambdaCase            #-}
 
-module Server (api) where
+module Server (api, Zoned(Zoned)) where
 
 import qualified Data.ByteString.Char8 as BS
 import qualified Data.ByteString.Lazy.Char8 as B
@@ -20,106 +22,150 @@ import qualified Data.ByteString.Base64 as B64
 import qualified Data.Text as T
 
 import Control.Monad (join)
-import Data.Maybe (catMaybes, isNothing, maybeToList)
-import           Data.Morpheus              (interpreter)
-import           Data.Morpheus.Document     (importGQLDocumentWithNamespace)
-import           Data.Morpheus.Types        (GQLRootResolver (..), Undefined, Undefined(Undefined), lift, failRes)
-import           Data.Text                  (Text)
-import           GHC.Generics ()
-import Database.PostgreSQL.Simple (connectPostgreSQL, Connection, query, query_, Only(Only), fromOnly)
-import Database.PostgreSQL.Simple.SqlQQ (sql)
+import Data.Aeson (ToJSON)
+import Data.Maybe (catMaybes, isNothing)
 import Data.String (fromString)
-import qualified Database.PostgreSQL.Simple as PSQL
+import Data.Text                  (Text)
 import Data.Time.LocalTime (ZonedTime)
 import Data.Time.Format.ISO8601 (formatShow, iso8601Format, iso8601ParseM)
+import GHC.Generics (Generic)
 
-importGQLDocumentWithNamespace "schema.gql"
+import Data.Morpheus       (interpreter)
+import Data.Morpheus.Types (GQLRootResolver (..), Undefined(Undefined), lift, GQLType, GQLScalar(..))
+import qualified Data.Morpheus.Types as MT
+import Data.Morpheus.Kind (SCALAR)
 
-sqlToGQL :: (T.Text, BS.ByteString, T.Text, ZonedTime, T.Text) -> UnidadHoraUbicacion _
+import Database.PostgreSQL.Simple (connectPostgreSQL, Connection, query, query_, Only(Only), fromOnly)
+import Database.PostgreSQL.Simple.SqlQQ (sql)
+import qualified Database.PostgreSQL.Simple as PSQL
+
+data Query m = Query
+  { ubicaciones :: QueryUbicacionesArgs -> m [UnidadHoraUbicacion m]
+  , alcaldiasDisponibles :: QueryAlcaldiasDisponiblesArgs -> m [Text]
+  } deriving (Generic, GQLType)
+
+data UnidadHoraUbicacion m = UnidadHoraUbicacion
+  { uHora :: m Zoned
+  , uAlcaldia :: m Text
+  , uLatLonText :: m Text
+  , uEwkbB64 :: m Text
+  , uVehicleId :: m Int
+  } deriving (Generic,GQLType)
+
+data QueryUbicacionesArgs = QueryUbicacionesArgs
+  { alcaldia :: Maybe Text
+  , unidadId :: Maybe Int
+  , horaIso8601 :: Maybe Zoned
+  } deriving (Generic)
+
+data QueryAlcaldiasDisponiblesArgs = QueryAlcaldiasDisponiblesArgs
+  { aHoraIso8601 :: Maybe Zoned
+  } deriving (Generic)
+
+instance MonadFail (Either Text) where
+  fail = Left . T.pack
+
+data Zoned = Zoned ZonedTime deriving (Generic, Show, ToJSON)
+
+instance GQLScalar Zoned where
+  parseValue (MT.String x) = fmap Zoned $ iso8601ParseM $ T.unpack x
+  serialize  (Zoned value) = MT.String $ T.pack $ formatShow iso8601Format value
+
+instance GQLType Zoned where
+  type KIND Zoned = SCALAR
+
+sqlToGQL :: (T.Text, BS.ByteString, T.Text, ZonedTime, Int) -> UnidadHoraUbicacion _
 sqlToGQL (lat_long_text, ewkb, alcaldia, hora, vehicleId) =
   UnidadHoraUbicacion {
-    unidadHoraUbicacionLatLongText = pure lat_long_text
-  , unidadHoraUbicacionEwkbHex = pure $ T.pack $ BS.unpack $ B64.encode ewkb
-  , unidadHoraUbicacionAlcaldia = pure alcaldia
-  , unidadHoraUbicacionHora = pure $ T.pack $ formatShow iso8601Format hora
-  , unidadHoraUbicacionVehicleId = pure $ vehicleId
+    uLatLonText = pure lat_long_text
+  , uEwkbB64 = pure $ T.pack $ BS.unpack $ B64.encode ewkb
+  , uAlcaldia = pure alcaldia
+  , uHora = pure $ Zoned hora
+  , uVehicleId = pure vehicleId
   }
+
+data SQLClauseAndBinding a = SQLClauseAndBinding {
+    sqlClause :: Text
+  , bindingValue :: a
+} deriving (Show)
+
+clauses :: Maybe Int -> Maybe Text -> Maybe ZonedTime -> [Text]
+clauses unidad alcaldia zoned =
+    catMaybes [vehicleClause, alcaldiaClause, timeClauses]
+  where
+    vehicleClause :: Maybe Text
+    vehicleClause =
+      fmap (\_ -> "vehicle_id = ?" ) unidad
+    alcaldiaClause :: Maybe Text
+    alcaldiaClause =
+      fmap (\_ -> "alcaldia = ?" ) alcaldia
+    timeClauses :: Maybe Text
+    timeClauses =
+        fmap (\_ -> "age(time_update, ?) > interval '-2 hours' and age(time_update, ?) < interval  '2 hours'") zoned
 
 rootResolver :: Connection -> GQLRootResolver IO () Query Undefined Undefined
 rootResolver conn =
   GQLRootResolver
     {
-      queryResolver = Query {queryUbicaciones, queryAlcaldiasDisponibles},
+      queryResolver = Query {ubicaciones=queryUbicaciones, alcaldiasDisponibles=queryAlcaldiasDisponibles},
       mutationResolver = Undefined,
       subscriptionResolver = Undefined
     }
   where
-    queryAlcaldiasDisponibles QueryAlcaldiasDisponiblesArgs {queryAlcaldiasDisponiblesArgsHoraIso8601=hora} =
+    queryAlcaldiasDisponibles QueryAlcaldiasDisponiblesArgs {aHoraIso8601=hora} =
       case hora of
         Nothing -> do
           alcaldias <- lift $ query_ conn "select alcaldia from refined group by alcaldia"
           pure $ map ( T.pack . fromOnly ) alcaldias
-        Just hora ->
-          case iso8601ParseM @Maybe @ZonedTime (T.unpack hora) of
-            Nothing -> failRes "invalid iso8601 time"
-            Just t -> do
-              alcaldias <-
-                lift $
-                  query
-                    conn
-                    [sql|
-                       select alcaldia from refined
-                         where age(time_update, ?) > interval '-2 hours'
-                           and age(time_update, ?) < interval '2 hours'
-                           group by alcaldia
-                    |]
-                    (t, t)
-              pure $ map ( T.pack . fromOnly ) alcaldias
-    queryUbicaciones QueryUbicacionesArgs {queryUbicacionesArgsUnidadId=unidad, queryUbicacionesArgsHoraIso8601=hora, queryUbicacionesArgsAlcaldia=alcaldia} =
-        let
-          zoned :: Maybe ZonedTime
-          zoned = join $ fmap (iso8601ParseM . T.unpack) hora
-          textClauses :: [(Text, Text)]
-          textClauses = catMaybes [
-              fmap (\vehicle_id_str -> ("vehicle_id = ?", vehicle_id_str)) unidad
-            , fmap (\alcaldia -> ("alcaldia = ?", alcaldia)) alcaldia
-            ]
-          timeClauses :: Maybe (Text, ZonedTime)
-          timeClauses =
-              fmap (\time_update -> ("age(time_update, ?) > interval '-2 hours' and age(time_update, ?) < interval  '2 hours'", time_update)) zoned
-          allClauses = fmap fst textClauses ++ maybeToList (fmap fst timeClauses)
-          where_clause :: PSQL.Query
-          where_clause =
-            if length textClauses == 0 && isNothing timeClauses
-              then ""
-              else fromString $ T.unpack $ " where " <> T.intercalate " and " allClauses
-          full_query :: PSQL.Query
-          full_query = "select lat_lon_text, ewkb, alcaldia, time_update, vehicle_id from refined" <> where_clause
-        in do
+        Just (Zoned t) -> do
+          alcaldias <- lift $
+            query
+              conn
+              [sql|
+                 select alcaldia from refined
+                   where age(time_update, ?) > interval '-2 hours'
+                     and age(time_update, ?) < interval '2 hours'
+                   group by alcaldia
+              |]
+              (t, t)
+          pure $ map ( T.pack . fromOnly ) alcaldias
+    queryUbicaciones QueryUbicacionesArgs {unidadId=unidad, horaIso8601=hora, alcaldia=alcaldia} =
+      let
+        zoned :: Maybe ZonedTime
+        zoned = fmap (\case Zoned x -> x) hora
+        allClauses = clauses unidad alcaldia zoned
+        full_query :: PSQL.Query
+        full_query = "select lat_lon_text, ewkb, alcaldia, time_update, vehicle_id from refined" <> where_clause
+          where
+            where_clause :: PSQL.Query
+            where_clause =
+              if allClauses == []
+                then ""
+                else fromString $ T.unpack $ " where " <> T.intercalate " and " allClauses
+      in do
+        latlons <- lift $
           case hora of
-            Nothing -> do
-              latlongs <-
-                lift $ case textClauses of
-                  [] ->
-                    query_ conn full_query
-                  one:[] ->
-                    query conn full_query $ (Only $ snd one)
-                  one:two:[] ->
-                    query conn full_query $ (snd one, snd two)
-              pure $ map sqlToGQL latlongs
-            Just hora ->
-              case iso8601ParseM @Maybe @ZonedTime (T.unpack hora) of
-                Nothing -> failRes "invalid iso8601 time"
-                Just zoned -> do
-                  latlongs <-
-                    lift $ case textClauses of
-                      [] ->
-                        query conn full_query $ (zoned, zoned)
-                      one:[] ->
-                        query conn full_query $ (snd one, zoned, zoned)
-                      one:two:[] ->
-                        query conn full_query $ (snd one, snd two, zoned, zoned)
-                  pure $ map sqlToGQL latlongs
+            Nothing ->
+              case (unidad, alcaldia) of
+                (Nothing, Nothing) ->
+                  query_ conn full_query
+                (Just vehicle, Nothing) ->
+                  query conn full_query $ (Only $ vehicle)
+                (Just vehicle, Just alcaldia) ->
+                  query conn full_query $ (vehicle, alcaldia)
+                (Nothing , Just alcaldia) ->
+                  query conn full_query $ (Only $ alcaldia)
+            Just (Zoned zoned) ->
+              case (unidad, alcaldia) of
+                (Nothing, Nothing) ->
+                  query conn full_query $ (zoned, zoned)
+                (Just vehicle, Nothing) ->
+                  query conn full_query $ (vehicle, zoned, zoned)
+                (Just vehicle, Just alcaldia) ->
+                  query conn full_query $ (vehicle, alcaldia, zoned, zoned)
+                (Nothing, Just alcaldia) ->
+                  query conn full_query $ (alcaldia, zoned, zoned)
+        pure $ map sqlToGQL latlons
 
 api :: B.ByteString -> IO B.ByteString
 api input = do
