@@ -21,9 +21,8 @@ import qualified Data.ByteString.Lazy.Char8 as B
 import qualified Data.ByteString.Base64 as B64
 import qualified Data.Text as T
 
-import Control.Monad (join)
 import Data.Aeson (ToJSON)
-import Data.Maybe (catMaybes, isNothing)
+import Data.Maybe (catMaybes)
 import Data.String (fromString)
 import Data.Text                  (Text)
 import Data.Time.LocalTime (ZonedTime)
@@ -167,7 +166,7 @@ rootResolver conn =
                   query conn full_query $ (alcaldia, zoned, zoned)
         pure $ map sqlToGQL latlons
 
-api :: B.ByteString -> IO B.ByteString
-api input = do
-  conn <- connectPostgreSQL ""
+api :: String -> B.ByteString -> IO B.ByteString
+api host input = do
+  conn <- connectPostgreSQL $ "host='" <> BS.pack host <> "' dbname='postgres'"
   interpreter (rootResolver conn) input

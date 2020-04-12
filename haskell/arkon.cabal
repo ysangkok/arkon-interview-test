@@ -1,0 +1,33 @@
+cabal-version:       3.0
+
+name:                arkon
+version:             0.1.0.0
+author:              Janus Troelsen
+maintainer:          ysangkok@gmail.com
+build-type:          Simple
+extra-source-files:  schema.gql
+
+common arkon
+  other-modules:       Server
+  build-depends:       base >=4.13 && <4.15,
+                       bytestring,
+                       text,
+                       morpheus-graphql == 0.10.0,
+                       postgresql-simple == 0.6.*,
+                       base64-bytestring,
+                       uri-encode,
+                       time,
+                       mtl,
+                       transformers,
+                       aeson
+  default-language:    Haskell2010
+  ghc-options: -Wall
+
+executable webserver
+  import:              arkon
+  main-is:             HTTPServer.hs
+  build-depends:       scotty==0.11.*
+
+executable demo
+  import:              arkon
+  main-is:             Main.hs
