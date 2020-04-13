@@ -1,0 +1,20 @@
+apiVersion: apps/v1 # for versions before 1.9.0 use apps/v1beta2
+kind: Deployment
+metadata:
+  name: arkon-webserver
+spec:
+  selector:
+    matchLabels:
+      app: arkon-webserver
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        app: arkon-webserver
+    spec:
+      containers:
+      - name: arkon-webserver
+        image: ysangkok/arkon-webserver@sha256:93d01f989b8c84b83688d45d139533bef37bc8270e8709cfad612caafe6a8a12
+        args: ["postgres-demo-0"]
+        ports:
+        - containerPort: 3000

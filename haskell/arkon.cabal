@@ -25,9 +25,9 @@ common arkon
 
 executable webserver
   import:              arkon
-  main-is:             HTTPServer.hs
+  main-is:             WebServer.hs
   build-depends:       scotty==0.11.*
 
 executable demo
   import:              arkon
-  main-is:             Main.hs
+  main-is:             Demo.hs

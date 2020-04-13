@@ -1,3 +1,4 @@
+# una hora con la zona de tiempo. Mira el Server.hs
 scalar Zoned
 
 type Query {
@@ -7,6 +8,8 @@ type Query {
   ubicaciones(unidadId: Int, alcaldia: String, horaIso8601: Zoned): [UnidadHoraUbicacion!]!
 
   # Obtener una lista de alcaldías disponibles
+  # (alcaldias donde viajan metrobuses)
+  # filtrado de la hora en el parametro
   alcaldiasDisponibles(aHoraIso8601: Zoned): [String!]!
 }
 
