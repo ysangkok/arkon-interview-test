@@ -14,7 +14,7 @@ spec:
     spec:
       containers:
       - name: arkon-webserver
-        image: ysangkok/arkon-webserver@sha256:93d01f989b8c84b83688d45d139533bef37bc8270e8709cfad612caafe6a8a12
+        image: ysangkok/arkon-webserver@sha256:e56a946c0920994fc09f9891f4676a195f51e5ce098da93ac0490b06a891634a
         args: ["postgres-demo-0"]
         ports:
         - containerPort: 3000
